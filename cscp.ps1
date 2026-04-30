@@ -1,88 +1,63 @@
-param(
-    [switch]$p  # pull mode
-)
+<#
+    cscp.ps1 - Usage:
+        cscp          -> Push
+        cscp -Pull    -> Pull
+        cscp -Multi   -> Multi-Push
+#>
+param([switch]$Pull, [switch]$Multi)
 
-function QuitIfQ($v) {
-    if ($v -eq 'q') { exit }
+$ConfigDir   = Join-Path $HOME ".cscp"
+$HistoryFile = Join-Path $ConfigDir "history.json"
+if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null }
+
+$H = if (Test-Path $HistoryFile) { try { Get-Content $HistoryFile -Raw | ConvertFrom-Json } catch { $null } }
+if (-not $H) {
+    $H = [PSCustomObject]@{ IP="192.168.1."; Port="8022"; PushSrc=$null; PushDst="~"; PullSrc=$null; PullDst="." }
 }
 
-function NormalizePath($path) {
-    # Remove surrounding quotes if they exist
-    if ($path -match '^".*"$') {
-        $path = $path.Trim('"')
+function Save  { $H | ConvertTo-Json -Depth 3 | Set-Content $HistoryFile -Force }
+function Ask($msg, $def="") {
+    $v = Read-Host "$(if($def){"$msg [$def]"}else{$msg})"
+    if ($v -match '^[qQ]$') { exit }
+    if (-not $v) { return $def }
+    return $v.Trim('"',"'")
+}
+
+$H.Port = Ask "Port" $H.Port
+$raw    = Ask "IP"   $H.IP
+$H.IP   = if ($raw -match '^\d{1,3}$') { "192.168.1.$raw" } else { $raw }
+
+if (-not $Pull -and -not $Multi) {
+    $H.PushSrc = Ask "Source"      $H.PushSrc
+    $H.PushDst = Ask "Remote dest" $H.PushDst
+    $isDir = (Get-Item $H.PushSrc -EA SilentlyContinue)?.PSIsContainer
+    if ($isDir) { scp -r -P $H.Port $H.PushSrc "$($H.IP):$($H.PushDst)" }
+    else        { scp    -P $H.Port $H.PushSrc "$($H.IP):$($H.PushDst)" }
+
+} elseif ($Multi) {
+    $srcs      = (Ask "Sources (space-separated)" $H.PushSrc) -split '\s+' | Where-Object { $_ }
+    $H.PushSrc = $srcs -join ' '
+    $H.PushDst = Ask "Remote dest" $H.PushDst
+    foreach ($s in $srcs) {
+        $isDir = (Get-Item $s -EA SilentlyContinue)?.PSIsContainer
+        if ($isDir) { scp -r -P $H.Port $s "$($H.IP):$($H.PushDst)" }
+        else        { scp    -P $H.Port $s "$($H.IP):$($H.PushDst)" }
     }
-    return $path
-}
 
-function QuoteIfNeeded($path) {
-    if ($path -match '\s') {
-        return "`"$path`""
-    }
-    return $path
-}
-
-function Ask($msg, $default = $null) {
-    if ($default) {
-        $v = Read-Host "$msg [$default]"
-        QuitIfQ $v
-        if (-not $v) { return $default }
-        return $v
-    }
-    $v = Read-Host $msg
-    QuitIfQ $v
-    return $v
-}
-
-function IsValidPort($p) {
-    return ($p -match '^\d{1,5}$' -and [int]$p -ge 1 -and [int]$p -le 65535)
-}
-
-function IsValidIP($ip) {
-    return [System.Net.IPAddress]::TryParse($ip, [ref]$null)
-}
-
-# ---- PORT ----
-do {
-    $port = Ask "Port" "8022"
-} until (IsValidPort $port)
-
-# ---- IP ----
-do {
-    $ipInput = Ask "IP" "192.168.1."
-    if ($ipInput -match '^\d{1,3}$') {
-        $ip = "192.168.1.$ipInput"
+} else {
+    $H.PullSrc = Ask "Remote source" $H.PullSrc
+    $H.PullDst = Ask "Local dest"    $H.PullDst
+    $forceR    = $H.PullSrc.EndsWith('/') -or $H.PullSrc.Contains('*')
+    if ($forceR) {
+        scp -r -P $H.Port "$($H.IP):$($H.PullSrc)" $H.PullDst
     } else {
-        $ip = $ipInput
+        $tmp = [System.IO.Path]::GetTempFileName()
+        scp -P $H.Port "$($H.IP):$($H.PullSrc)" $H.PullDst 2>$tmp
+        if ($LASTEXITCODE -ne 0 -and (Get-Content $tmp -Raw) -match 'not a regular file') {
+            scp -r -P $H.Port "$($H.IP):$($H.PullSrc)" $H.PullDst
+        }
+        Remove-Item $tmp -Force -EA SilentlyContinue
     }
-} until (IsValidIP $ip)
-
-if (-not $p) {
-	# -------- PUSH --------
-	$src = Ask "Local file path"
-	$src = NormalizePath $src
-
-	if (-not (Test-Path $src -PathType Leaf)) {
-    	Write-Error "Source file does not exist"
-    	exit 1
-	}
-
-	$dst = Ask "Remote destination" "~"
-	$src = QuoteIfNeeded $src
-	
-scp -P $port $src "${ip}:$dst"
 }
-else {
-   	# -------- PULL --------
-	$src = Ask "Remote file path"
-	$dst = Ask "Local destination" "."
 
-	$dst = NormalizePath $dst
-
-	if (-not (Test-Path $dst -PathType Container)) {
-    	Write-Error "Destination directory does not exist"
-    	exit 1
-	}
-
-	$dst = QuoteIfNeeded $dst
-	scp -P $port "${ip}:$src" $dst
-}
+Save
