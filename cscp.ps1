@@ -167,6 +167,11 @@ else {
 
     $dst = Expand-LocalPath $dst
 
+    if (-not (Test-Path $dst)) {
+        Write-Host "Creating local directory: $dst" -ForegroundColor DarkGray
+        New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    }
+
     Write-Host ""
     Write-Host "-> Pull : scp -P $port ${ip}:`"$src`" `"$dst`"" -ForegroundColor Yellow
 
