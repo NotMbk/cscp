@@ -24,6 +24,7 @@ $DefaultDir  = "."
 $History = if (Test-Path $HistoryFile) {
     try { Get-Content $HistoryFile -Raw | ConvertFrom-Json } catch { $null }
 }
+
 if (-not $History) {
     $History = [PSCustomObject]@{
         LastIP      = $DefaultIP
@@ -48,100 +49,41 @@ function Expand-LocalPath {
     return $Path
 }
 
-# -- Read-WithCompletion -------------------------------------------------------
-function Read-WithCompletion {
+# -- Simple input -------------------------------------------------------------
+function Ask {
     param(
         [string]$Prompt,
-        [string]$Default = "",
-        [string[]]$Candidates = @()
+        [string]$Default = ""
     )
 
-    Write-Host -NoNewline "$Prompt [$Default]: "
-
-    $buf        = [System.Text.StringBuilder]::new()
-    $tabIndex   = -1
-    $tabBase    = ""
-    $tabMatches = @()
-
-    while ($true) {
-        $k = [Console]::ReadKey($true)
-
-        if ($k.Key -eq 'Enter') {
-            Write-Host ""
-            $result = $buf.ToString().Trim('"', "'")
-            if ($result -eq 'q' -or $result -eq 'Q') {
-                Write-Host "Aborted." -ForegroundColor DarkGray
-                exit
-            }
-            if ($result -eq "") { return $Default }
-            return $result
-        }
-
-        if ($k.Key -eq 'Escape' -or ($k.Key -eq 'q' -and $buf.Length -eq 0)) {
-            Write-Host ""
-            Write-Host "Aborted." -ForegroundColor DarkGray
-            exit
-        }
-
-        if ($k.Key -eq 'Backspace') {
-            if ($buf.Length -gt 0) {
-                $buf.Remove($buf.Length - 1, 1) | Out-Null
-                [Console]::Write("`b `b")
-                $tabIndex = -1
-            }
-            continue
-        }
-
-        if ($k.Key -eq 'Tab') {
-            if ($Candidates.Count -eq 0) { continue }
-
-            if ($tabIndex -eq -1) {
-                $tabBase    = $buf.ToString()
-                $tabMatches = $Candidates | Where-Object { $_ -like "$tabBase*" }
-                if ($tabMatches.Count -eq 0) { continue }
-            }
-
-            $tabIndex   = ($tabIndex + 1) % $tabMatches.Count
-            $completion = $tabMatches[$tabIndex]
-
-            $clearLen = $buf.Length
-            [Console]::Write("`r" + "$Prompt [$Default]: " + (" " * $clearLen) + "`r" + "$Prompt [$Default]: ")
-            $buf.Clear() | Out-Null
-            $buf.Append($completion) | Out-Null
-            [Console]::Write($completion)
-            continue
-        }
-
-        $tabIndex = -1
-        $char = $k.KeyChar
-        if ([char]::IsControl($char)) { continue }
-        $buf.Append($char) | Out-Null
-        [Console]::Write($char)
+    if ($Default) {
+        Write-Host -NoNewline "$Prompt [$Default]: "
+    } else {
+        Write-Host -NoNewline "${Prompt}: "
     }
-}
 
-function Ask {
-    param([string]$Prompt, [string]$Default = "")
-    return Read-WithCompletion -Prompt $Prompt -Default $Default -Candidates @()
+    $input = Read-Host
+
+    if ([string]::IsNullOrWhiteSpace($input)) {
+        return $Default
+    }
+
+    if ($input -eq 'q' -or $input -eq 'Q') {
+        Write-Host "Aborted." -ForegroundColor DarkGray
+        exit
+    }
+
+    return $input
 }
 
 function Ask-Path {
-    param([string]$Prompt, [string]$Default = "", [switch]$DirsOnly)
+    param(
+        [string]$Prompt,
+        [string]$Default = "",
+        [switch]$DirsOnly
+    )
 
-    $candidates = @()
-    try {
-        if ($DirsOnly) {
-            $candidates = Get-ChildItem -Path "." -Recurse -Directory -ErrorAction SilentlyContinue |
-                          Select-Object -ExpandProperty FullName |
-                          ForEach-Object { $_.Replace($PWD.Path + [IO.Path]::DirectorySeparatorChar, "") }
-        } else {
-            $candidates = Get-ChildItem -Path "." -Recurse -File -ErrorAction SilentlyContinue |
-                          Select-Object -ExpandProperty FullName |
-                          ForEach-Object { $_.Replace($PWD.Path + [IO.Path]::DirectorySeparatorChar, "") }
-        }
-    } catch {}
-
-    return Read-WithCompletion -Prompt $Prompt -Default $Default -Candidates $candidates
+    return Ask $Prompt $Default
 }
 
 # -- SCP -----------------------------------------------------------------------
@@ -177,31 +119,30 @@ function Invoke-Scp {
         return
     }
 
-    if ($errText) { Write-Host $errText -ForegroundColor Red }
+    if ($errText) {
+        Write-Host $errText -ForegroundColor Red
+    }
 }
 
 # -- Header --------------------------------------------------------------------
-$modeLabel = if ($Pull) { "PULL" } else { "PUSH" }
-Write-Host "  cscp // $modeLabel" -ForegroundColor Cyan
-Write-Host "  (q or Esc to quit)" -ForegroundColor DarkGray
-Write-Host ""
+Write-Host "(q to quit)" -ForegroundColor DarkGray
 
 # -- Connection ----------------------------------------------------------------
-$port    = Ask "Port" $History.LastPort
+$port = Ask "Port" $History.LastPort
 $History.LastPort = $port
 
 $ipInput = Ask "IP" $History.LastIP
-$ip      = if ($ipInput -match '^\d{1,3}$') { "192.168.1.$ipInput" } else { $ipInput }
+$ip = if ($ipInput -match '^\d{1,3}$') { "192.168.1.$ipInput" } else { $ipInput }
 $History.LastIP = $ip
+
 Write-Host ""
 
-# =============================================================================
-#  PUSH
-# =============================================================================
+# PUSH
 if (-not $Pull) {
 
-    $src = Ask-Path "Local source"       $History.LastPushSrc
+    $src = Ask-Path "Local source" $History.LastPushSrc
     $dst = Ask      "Remote destination" $History.LastPushDst
+
     $History.LastPushSrc = $src
     $History.LastPushDst = $dst
 
@@ -215,13 +156,12 @@ if (-not $Pull) {
     Invoke-Scp -Port $port -Src $src -Dst "${ip}:$dst" -Recursive:$isDir
 }
 
-# =============================================================================
-#  PULL
-# =============================================================================
+# PULL
 else {
 
-    $src = Ask      "Remote source"     $History.LastPullSrc
+    $src = Ask      "Remote source" $History.LastPullSrc
     $dst = Ask-Path "Local destination" $History.LastPullDst -DirsOnly
+
     $History.LastPullSrc = $src
     $History.LastPullDst = $dst
 
@@ -235,5 +175,3 @@ else {
 
 # -- Wrap up -------------------------------------------------------------------
 Save-History
-Write-Host ""
-Write-Host "Done." -ForegroundColor Green
